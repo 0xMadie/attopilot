@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Light Fang — BYD Atto 3</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/mqttws31.min.js"></script>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --card: #111118;
+    --border: #1e1e2e;
+    --accent: #00d4ff;
+    --green: #00ff88;
+    --yellow: #ffd700;
+    --red: #ff4455;
+    --text: #e0e0f0;
+    --muted: #555570;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'SF Pro Display', -apple-system, sans-serif; min-height: 100vh; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 20px 24px; border-bottom: 1px solid var(--border);
+  }
+  .logo { font-size: 1.3rem; font-weight: 700; letter-spacing: -0.5px; }
+  .logo span { color: var(--accent); }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); display: inline-block; margin-right: 8px; transition: background .3s; }
+  .status-dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  #conn-label { font-size: .85rem; color: var(--muted); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; padding: 20px 24px; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    padding: 18px 20px; position: relative; overflow: hidden;
+  }
+  .card::before { content: ''; position: absolute; inset: 0; border-radius: 14px; opacity: 0; transition: opacity .3s; }
+  .card.update::before { background: rgba(0,212,255,.05); opacity: 1; }
+  .card-label { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .card-value { font-size: 2rem; font-weight: 700; line-height: 1; }
+  .card-unit { font-size: .85rem; color: var(--muted); margin-left: 4px; }
+  .card-sub { font-size: .78rem; color: var(--muted); margin-top: 6px; }
+
+  /* SOC bar */
+  .soc-bar { height: 4px; background: var(--border); border-radius: 2px; margin-top: 10px; overflow: hidden; }
+  .soc-fill { height: 100%; border-radius: 2px; transition: width .5s ease, background .3s; }
+
+  /* Gear display */
+  .gear-display { font-size: 3.5rem; font-weight: 900; color: var(--accent); letter-spacing: -2px; }
+
+  /* Tyres grid */
+  .tyre-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .tyre { background: var(--bg); border-radius: 8px; padding: 8px 10px; }
+  .tyre-pos { font-size: .65rem; color: var(--muted); text-transform: uppercase; }
+  .tyre-val { font-size: 1.1rem; font-weight: 600; }
+
+  /* Map */
+  .map-card { grid-column: span 2; }
+  #map-frame { width: 100%; height: 220px; border-radius: 10px; border: none; }
+
+  /* Events log */
+  .events-card { grid-column: span 2; }
+  #events { font-size: .8rem; color: var(--muted); max-height: 120px; overflow-y: auto; }
+  .event-row { padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .event-row .ts { color: var(--accent); margin-right: 8px; }
+
+  /* Last update */
+  #last-update { font-size: .75rem; color: var(--muted); padding: 0 24px 16px; }
+
+  /* Responsive */
+  @media (max-width: 500px) {
+    .map-card, .events-card { grid-column: span 1; }
+    .card-value { font-size: 1.6rem; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Light <span>Fang</span> 🐺</div>
+  <div>
+    <span class="status-dot" id="dot"></span>
+    <span id="conn-label">Connecting…</span>
+  </div>
+</header>
+
+<div class="grid">
+  <!-- SOC -->
+  <div class="card" id="card-soc" style="grid-column: span 2">
+    <div class="card-label">State of Charge</div>
+    <div><span class="card-value" id="soc">--</span><span class="card-unit">%</span>
+      &nbsp;&nbsp;<span style="font-size:.9rem;color:var(--muted)" id="soh-badge"></span>
+    </div>
+    <div class="soc-bar"><div class="soc-fill" id="soc-fill" style="width:0%"></div></div>
+    <div class="card-sub" id="range-sub"></div>
+  </div>
+
+  <!-- Gear -->
+  <div class="card">
+    <div class="card-label">Gear</div>
+    <div class="gear-display" id="gear">--</div>
+    <div class="card-sub" id="speed-sub"></div>
+  </div>
+
+  <!-- Battery voltage -->
+  <div class="card">
+    <div class="card-label">Pack Voltage</div>
+    <div><span class="card-value" id="voltage">--</span><span class="card-unit">V</span></div>
+    <div class="card-sub" id="v12-sub"></div>
+  </div>
+
+  <!-- Charging -->
+  <div class="card">
+    <div class="card-label">Charging Power</div>
+    <div><span class="card-value" id="charge">--</span><span class="card-unit">kW</span></div>
+    <div class="card-sub" id="charge-sub"></div>
+  </div>
+
+  <!-- Cell temps -->
+  <div class="card">
+    <div class="card-label">Cell Temps</div>
+    <div><span class="card-value" id="temp-max">--</span><span class="card-unit">°C</span></div>
+    <div class="card-sub" id="temp-sub"></div>
+  </div>
+
+  <!-- Odometer -->
+  <div class="card">
+    <div class="card-label">Odometer</div>
+    <div><span class="card-value" id="odo">--</span><span class="card-unit">km</span></div>
+    <div class="card-sub" id="discharge-sub"></div>
+  </div>
+
+  <!-- Cell voltages -->
+  <div class="card">
+    <div class="card-label">Cell Voltages</div>
+    <div><span class="card-value" id="cell-v">--</span><span class="card-unit">V</span></div>
+    <div class="card-sub" id="cell-v-sub"></div>
+  </div>
+
+  <!-- Tyres -->
+  <div class="card" style="grid-column: span 2">
+    <div class="card-label" style="margin-bottom:12px">Tyre Pressure & Temp</div>
+    <div class="tyre-grid">
+      <div class="tyre"><div class="tyre-pos">Front Left</div><div class="tyre-val" id="tfl">--</div></div>
+      <div class="tyre"><div class="tyre-pos">Front Right</div><div class="tyre-val" id="tfr">--</div></div>
+      <div class="tyre"><div class="tyre-pos">Rear Left</div><div class="tyre-val" id="trl">--</div></div>
+      <div class="tyre"><div class="tyre-pos">Rear Right</div><div class="tyre-val" id="trr">--</div></div>
+    </div>
+  </div>
+
+  <!-- Map -->
+  <div class="card map-card">
+    <div class="card-label" style="margin-bottom:10px">Location</div>
+    <iframe id="map-frame" src="about:blank" allowfullscreen></iframe>
+    <div class="card-sub" id="wifi-sub" style="margin-top:6px"></div>
+  </div>
+
+  <!-- Events -->
+  <div class="card events-card">
+    <div class="card-label" style="margin-bottom:8px">Events</div>
+    <div id="events"><div style="color:var(--muted);font-size:.8rem">Waiting for events…</div></div>
+  </div>
+</div>
+
+<div id="last-update"></div>
+
+<script>
+const MQTT_HOST = '49.13.144.198';
+const MQTT_PORT = 9001;
+const MQTT_USER = 'attopilot';
+const MQTT_PASS = 'Att0p1l0t@2026';
+const TOPIC = 'electro/telemetry/light-fang/data';
+
+let mapLat = null, mapLon = null, client;
+
+function flash(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.classList.remove('update');
+  void el.offsetWidth;
+  el.classList.add('update');
+  setTimeout(() => el.classList.remove('update'), 600);
+}
+
+function socColor(pct) {
+  if (pct > 50) return 'var(--green)';
+  if (pct > 20) return 'var(--yellow)';
+  return 'var(--red)';
+}
+
+function set(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+function updateMap(lat, lon) {
+  if (lat === mapLat && lon === mapLon) return;
+  mapLat = lat; mapLon = lon;
+  document.getElementById('map-frame').src =
+    `https://www.openstreetmap.org/export/embed.html?bbox=${lon-0.005},${lat-0.005},${lon+0.005},${lat+0.005}&layer=mapnik&marker=${lat},${lon}`;
+}
+
+function logEvent(msg) {
+  const box = document.getElementById('events');
+  const ts = new Date().toLocaleTimeString();
+  const row = document.createElement('div');
+  row.className = 'event-row';
+  row.innerHTML = `<span class="ts">${ts}</span>${msg}`;
+  box.prepend(row);
+  while (box.children.length > 20) box.removeChild(box.lastChild);
+}
+
+let prevGear = null, prevSoc = null, prevCharging = false;
+
+function render(d) {
+  // SOC
+  const soc = d.soc ?? d.soc_panel;
+  if (soc != null) {
+    set('soc', soc.toFixed(1));
+    const fill = document.getElementById('soc-fill');
+    fill.style.width = soc + '%';
+    fill.style.background = socColor(soc);
+    if (prevSoc !== null && Math.abs(soc - prevSoc) >= 2) logEvent(`SOC ${prevSoc.toFixed(0)}% → ${soc.toFixed(0)}%`);
+    prevSoc = soc;
+  }
+  if (d.soh) set('soh-badge', `SOH ${d.soh}%`);
+  if (d.electric_driving_range_km != null) set('range-sub', `${d.electric_driving_range_km} km range`);
+
+  // Gear & speed
+  if (d.gear) {
+    set('gear', d.gear);
+    document.getElementById('gear').style.color = d.gear === 'P' ? 'var(--muted)' : d.gear === 'R' ? 'var(--red)' : 'var(--accent)';
+    if (prevGear && d.gear !== prevGear) logEvent(`Gear ${prevGear} → ${d.gear}`);
+    prevGear = d.gear;
+  }
+  if (d.speed != null) set('speed-sub', `${d.speed} km/h`);
+
+  // Voltage
+  if (d.battery_total_voltage) set('voltage', d.battery_total_voltage);
+  if (d.battery_12v_voltage) set('v12-sub', `12V aux: ${d.battery_12v_voltage}V`);
+
+  // Charging
+  if (d.charging_power != null) {
+    const isCharging = d.charging_power > 0;
+    set('charge', d.charging_power > 0 ? d.charging_power.toFixed(1) : '0');
+    set('charge-sub', isCharging ? `AC limit: ${d.ac_charging_current_limit_status || '--'}` : 'Not charging');
+    if (isCharging && !prevCharging) logEvent(`⚡ Charging started ${d.charging_power.toFixed(1)}kW`);
+    if (!isCharging && prevCharging) logEvent(`🔋 Charging stopped`);
+    prevCharging = isCharging;
+  }
+
+  // Temps
+  if (d.battery_cell_temp_max != null) {
+    set('temp-max', d.battery_cell_temp_max);
+    set('temp-sub', `min: ${d.battery_cell_temp_min}°C`);
+  }
+
+  // Cell voltages
+  if (d.battery_cell_voltage_max) {
+    set('cell-v', d.battery_cell_voltage_max.toFixed(3));
+    set('cell-v-sub', `min: ${d.battery_cell_voltage_min?.toFixed(3)}V`);
+  }
+
+  // Odometer
+  if (d.odometer) {
+    set('odo', d.odometer.toFixed(0));
+    if (d.total_discharge) set('discharge-sub', `Total used: ${d.total_discharge.toFixed(0)} kWh`);
+  }
+
+  // Tyres
+  const tf = (psi, temp) => psi != null ? `${psi} psi · ${temp}°C` : '--';
+  set('tfl', tf(d.tyre_pressure_left_front_psi, d.tyre_temperature_left_front_c));
+  set('tfr', tf(d.tyre_pressure_right_front_psi, d.tyre_temperature_right_front_c));
+  set('trl', tf(d.tyre_pressure_left_rear_psi, d.tyre_temperature_left_rear_c));
+  set('trr', tf(d.tyre_pressure_right_rear_psi, d.tyre_temperature_right_rear_c));
+
+  // Map
+  if (d.location_latitude && d.location_longitude) {
+    updateMap(d.location_latitude, d.location_longitude);
+  }
+  if (d.wifi_ssid) set('wifi-sub', `WiFi: ${d.wifi_ssid}`);
+
+  // Status
+  document.getElementById('last-update').textContent =
+    `Last update: ${new Date().toLocaleTimeString()} · Car ${d.car_on ? 'ON' : 'OFF'} · ${d.any_door_opened ? '🚪 Door open' : '🔒 Closed'}`;
+
+  flash('card-soc');
+}
+
+function connect() {
+  const id = 'dash-' + Math.random().toString(36).slice(2, 8);
+  client = new Paho.MQTT.Client(MQTT_HOST, MQTT_PORT, id);
+  client.onConnectionLost = () => {
+    document.getElementById('dot').className = 'status-dot';
+    set('conn-label', 'Disconnected — retrying…');
+    setTimeout(connect, 3000);
+  };
+  client.onMessageArrived = msg => {
+    try { render(JSON.parse(msg.payloadString)); } catch(e) {}
+  };
+  client.connect({
+    useSSL: false,
+    userName: MQTT_USER,
+    password: MQTT_PASS,
+    onSuccess: () => {
+      document.getElementById('dot').className = 'status-dot live';
+      set('conn-label', 'Live');
+      client.subscribe(TOPIC);
+      logEvent('Connected to broker');
+    },
+    onFailure: () => {
+      set('conn-label', 'Failed — retrying…');
+      setTimeout(connect, 4000);
+    }
+  });
+}
+
+connect();
+</script>
+</body>
+</html>
