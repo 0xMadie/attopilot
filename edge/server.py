@@ -116,20 +116,17 @@ def mqtt_publish(topic: str, data: dict):
 async def poll_loop():
     while True:
         try:
-            if not state["adb_connected"]:
-                adb_connect()
-            if state["adb_connected"]:
-                data = read_car_state()
-                mqtt_publish("attopilot/telemetry", data)
-                # Broadcast to WebSocket clients
-                dead = []
-                for ws in ws_clients:
-                    try:
-                        await ws.send_json(data)
-                    except Exception:
-                        dead.append(ws)
-                for ws in dead:
-                    ws_clients.remove(ws)
+            data = read_car_state()  # relay handles ADB reconnect
+            mqtt_publish("attopilot/telemetry", data)
+            # Broadcast to WebSocket clients
+            dead = []
+            for ws in ws_clients:
+                try:
+                    await ws.send_json(data)
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                ws_clients.remove(ws)
         except Exception as e:
             log.error(f"Poll error: {e}")
         await asyncio.sleep(5)
@@ -138,10 +135,6 @@ async def poll_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     mqtt_setup()
-    try:
-        adb_connect()
-    except Exception as e:
-        log.warning(f"ADB startup connect failed (will retry in poll loop): {e}")
     asyncio.create_task(poll_loop())
     yield
     if mqtt_client:
@@ -171,11 +164,8 @@ def run_command(body: dict, token: str = ""):
 @app.get("/screenshot")
 def get_screenshot(token: str = ""):
     _auth(token)
-    path = _screenshot()
-    from fastapi.responses import FileResponse
-    if os.path.exists(path):
-        return FileResponse(path, media_type="image/png")
-    raise HTTPException(status_code=503, detail="Screenshot failed — ADB may be offline")
+    result = relay_command("screenshot")
+    return {"result": result}
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket, token: str = ""):
