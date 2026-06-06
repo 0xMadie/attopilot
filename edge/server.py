@@ -55,9 +55,12 @@ def adb(*args, timeout=8) -> str:
         return f"ERROR:{e}"
 
 def adb_connect() -> bool:
-    out = subprocess.run([ADB, "connect", f"{ADB_HOST}:{ADB_PORT}"],
-                         capture_output=True, text=True, timeout=8).stdout
-    ok = "connected" in out.lower()
+    try:
+        out = subprocess.run([ADB, "connect", f"{ADB_HOST}:{ADB_PORT}"],
+                             capture_output=True, text=True, timeout=5).stdout
+        ok = "connected" in out.lower()
+    except Exception:
+        ok = False
     state["adb_connected"] = ok
     return ok
 
@@ -175,7 +178,10 @@ async def poll_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     mqtt_setup()
-    adb_connect()
+    try:
+        adb_connect()
+    except Exception as e:
+        log.warning(f"ADB startup connect failed (will retry in poll loop): {e}")
     asyncio.create_task(poll_loop())
     yield
     if mqtt_client:
