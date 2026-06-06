@@ -19,8 +19,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("attopilot")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-ADB_HOST = os.getenv("ADB_HOST", "192.168.1.155")
-ADB_PORT = os.getenv("ADB_PORT", "5555")
+# MacBook relay (near car, handles ADB)
+RELAY_HOST = os.getenv("RELAY_HOST", "100.72.184.10")
+RELAY_PORT_HTTP = int(os.getenv("RELAY_PORT_HTTP", "8766"))
 MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_USER = os.getenv("MQTT_USER", "attopilot")
@@ -41,85 +42,44 @@ state: dict = {
 ws_clients: list[WebSocket] = []
 mqtt_client: mqtt.Client = None
 
-# ── ADB helpers ───────────────────────────────────────────────────────────────
-ADB = "/opt/homebrew/bin/adb"
+# ── MacBook relay proxy ────────────────────────────────────────────────────────
+import urllib.request as _urllib
 
-def adb(*args, timeout=8) -> str:
+def relay_get(path: str) -> dict:
     try:
-        r = subprocess.run(
-            [ADB, "-s", f"{ADB_HOST}:{ADB_PORT}", *args],
-            capture_output=True, text=True, timeout=timeout
+        url = f"http://{RELAY_HOST}:{RELAY_PORT_HTTP}{path}"
+        with _urllib.urlopen(url, timeout=6) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        return {"error": str(e)}
+
+def relay_command(action: str) -> str:
+    try:
+        data = json.dumps({"action": action, "token": API_TOKEN}).encode()
+        req = _urllib.Request(
+            f"http://{RELAY_HOST}:{RELAY_PORT_HTTP}/command",
+            data=data, headers={"Content-Type": "application/json"}
         )
-        return r.stdout.strip()
+        with _urllib.urlopen(req, timeout=10) as r:
+            return json.loads(r.read()).get("result", "")
     except Exception as e:
         return f"ERROR:{e}"
 
-def adb_connect() -> bool:
-    try:
-        out = subprocess.run([ADB, "connect", f"{ADB_HOST}:{ADB_PORT}"],
-                             capture_output=True, text=True, timeout=5).stdout
-        ok = "connected" in out.lower()
-    except Exception:
-        ok = False
-    state["adb_connected"] = ok
-    return ok
-
-def read_prop(prop: str) -> str:
-    return adb("shell", "getprop", prop)
-
 def read_car_state() -> dict:
-    props = {}
-    for p in ["sys.ivi.mcu_hw_ver", "sys.carplay.accoff", "ro.build.product"]:
-        props[p] = read_prop(p)
-
-    mcu = props.get("sys.ivi.mcu_hw_ver", "")
-    state["mcu_online"] = bool(mcu and mcu != "MCU_OFFLINE" and not mcu.startswith("ERROR"))
-
-    # Try reading drive state via service call
-    raw = adb("shell", "service", "call", "byd_car_service", "7")
-    state["drive_state"] = _parse_int32(raw) if raw and not raw.startswith("ERROR") else 0
-
+    relay = relay_get("/status")
+    state["adb_connected"] = relay.get("adb_connected", False)
+    state["mcu_online"] = relay.get("mcu_online", False)
+    state["drive_state"] = relay.get("drive_state", 0)
     state["last_update"] = datetime.utcnow().isoformat()
     return dict(state)
 
-def _parse_int32(raw: str) -> int:
-    # service call returns: "Result: Parcel(00000000 0000000X ...)"
-    try:
-        parts = raw.replace("Result:", "").replace("Parcel(", "").strip()
-        tokens = parts.split()
-        if len(tokens) >= 2:
-            return int(tokens[1], 16)
-    except Exception:
-        pass
-    return 0
-
 # ── Commands ──────────────────────────────────────────────────────────────────
-COMMANDS = {
-    "screenshot": lambda: _screenshot(),
-    "sunroof_open": lambda: _intent("com.byd.sunroof.OPEN"),
-    "sunroof_close": lambda: _intent("com.byd.sunroof.CLOSE"),
-    "sunroof_tilt": lambda: _intent("com.byd.sunroof.TILT"),
-    "window_all_up": lambda: _intent("com.byd.window.ALL_UP"),
-    "window_all_down": lambda: _intent("com.byd.window.ALL_DOWN"),
-    "horn": lambda: adb("shell", "service", "call", "byd_car_service", "20", "i32", "1"),
-    "ac_on": lambda: _intent("com.byd.hvac.AC_ON"),
-    "ac_off": lambda: _intent("com.byd.hvac.AC_OFF"),
-    "hazard_on": lambda: _intent("com.byd.body.HAZARD_ON"),
-    "hazard_off": lambda: _intent("com.byd.body.HAZARD_OFF"),
-    "adb_reconnect": lambda: str(adb_connect()),
-}
-
-def _intent(action: str) -> str:
-    return adb("shell", "am", "broadcast", "-a", action)
-
-def _screenshot() -> str:
-    ts = int(time.time())
-    remote = f"/sdcard/attopilot_{ts}.png"
-    local = f"/tmp/attopilot_{ts}.png"
-    adb("shell", "screencap", "-p", remote)
-    adb("pull", remote, local)
-    adb("shell", "rm", remote)
-    return local
+# All commands proxy through MacBook relay
+COMMANDS = {k: (lambda k=k: relay_command(k)) for k in [
+    "screenshot", "sunroof_open", "sunroof_close", "sunroof_tilt",
+    "window_all_up", "window_all_down", "horn", "ac_on", "ac_off",
+    "hazard_on", "hazard_off", "adb_reconnect",
+]}
 
 # ── MQTT ──────────────────────────────────────────────────────────────────────
 def mqtt_setup():
